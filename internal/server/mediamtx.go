@@ -116,7 +116,7 @@ func (s *MediaMTXServer) Start(ctx context.Context) error {
 
 	// Wait for server to be ready
 	if err := s.waitForReady(5 * time.Second); err != nil {
-		s.Stop()
+		s.stopLocked() // Use stopLocked to avoid mutex deadlock
 		return fmt.Errorf("mediamtx failed to start: %w", err)
 	}
 
@@ -137,6 +137,12 @@ func (s *MediaMTXServer) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.stopLocked()
+}
+
+// stopLocked performs the actual stop logic without acquiring the mutex.
+// Must be called while holding s.mu.
+func (s *MediaMTXServer) stopLocked() error {
 	if !s.running {
 		return nil
 	}
@@ -336,14 +342,15 @@ func (s *MediaMTXServer) ensureConfig(configPath string) error {
 
 	// Create minimal config
 	config := fmt.Sprintf(`# MediaMTX configuration for youtube-rtsp-proxy
-rtspAddress: :%d
+api: yes
 apiAddress: :%d
+rtspAddress: :%d
 logLevel: %s
 
 paths:
   all:
     # Allow any path
-`, s.serverCfg.RTSPPort, s.serverCfg.APIPort, s.config.LogLevel)
+`, s.serverCfg.APIPort, s.serverCfg.RTSPPort, s.config.LogLevel)
 
 	return os.WriteFile(configPath, []byte(config), 0644)
 }
