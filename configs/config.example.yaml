@@ -1,0 +1,83 @@
+# YouTube to RTSP Proxy Configuration
+# Copy this file to /etc/youtube-rtsp-proxy/config.yaml or ~/.youtube-rtsp-proxy/config.yaml
+
+# Server settings
+server:
+  # RTSP server port
+  rtsp_port: 8554
+  # MediaMTX API port (for health checks)
+  api_port: 9997
+
+# MediaMTX settings
+mediamtx:
+  # Path to MediaMTX binary
+  binary_path: "mediamtx"
+  # Custom config file (optional, auto-generated if empty)
+  config_path: ""
+  # Log level: debug, info, warn, error
+  log_level: "info"
+
+# FFmpeg settings
+ffmpeg:
+  # Path to FFmpeg binary
+  binary_path: "ffmpeg"
+  # Input options (applied before -i)
+  input_options:
+    - "-reconnect"
+    - "1"
+    - "-reconnect_streamed"
+    - "1"
+    - "-reconnect_delay_max"
+    - "5"
+  # Output options (applied after -i, before output URL)
+  output_options:
+    - "-c:v"
+    - "copy"
+    - "-c:a"
+    - "aac"
+    - "-f"
+    - "rtsp"
+
+# yt-dlp settings
+ytdlp:
+  # Path to yt-dlp binary
+  binary_path: "yt-dlp"
+  # Timeout for URL extraction
+  timeout: "30s"
+  # Video format selection
+  # Use "best" for highest quality, or specify resolution like "best[height<=720]"
+  format: "best[protocol=https]/best"
+
+# Monitoring and auto-reconnect settings
+monitor:
+  # How often to check stream health
+  health_check_interval: "30s"
+  # How often to refresh stream URLs (for live streams)
+  url_refresh_interval: "30m"
+  # Number of consecutive errors before triggering URL refresh
+  max_consecutive_errors: 3
+  # Reconnection settings
+  reconnect:
+    # Initial delay before first reconnect attempt
+    initial_delay: "5s"
+    # Maximum delay between reconnect attempts
+    max_delay: "5m"
+    # Multiplier for exponential backoff
+    multiplier: 2.0
+    # Maximum number of reconnect attempts
+    max_attempts: 10
+
+# Storage settings
+storage:
+  # Directory for storing stream state and logs
+  # Default: ~/.local/share/youtube-rtsp-proxy
+  data_dir: ""
+
+# Logging settings
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+  # Log format: text, json
+  format: "text"
+  # Log file (empty for stdout)
+  file: ""
