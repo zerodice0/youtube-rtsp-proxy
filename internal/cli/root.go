@@ -64,6 +64,8 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(favCmd)
+	rootCmd.AddCommand(reconnectCmd)
 }
 
 // initApp initializes the application components

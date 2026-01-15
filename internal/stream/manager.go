@@ -8,6 +8,7 @@ import (
 
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/config"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/extractor"
+	"github.com/zerodice0/youtube-rtsp-proxy/internal/logger"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/server"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/storage"
 )
@@ -19,11 +20,12 @@ type Manager struct {
 	streams   map[string]*Stream
 	processes map[string]*FFmpegProcess
 
-	config    *config.Config
-	extractor extractor.Extractor
-	ffmpeg    *FFmpegManager
-	server    *server.MediaMTXServer
-	storage   *storage.FileStorage
+	config        *config.Config
+	extractor     extractor.Extractor
+	ffmpeg        *FFmpegManager
+	server        *server.MediaMTXServer
+	storage       *storage.FileStorage
+	loggerManager *logger.LoggerManager
 }
 
 // NewManager creates a new stream manager
@@ -34,13 +36,14 @@ func NewManager(
 	store *storage.FileStorage,
 ) *Manager {
 	return &Manager{
-		streams:   make(map[string]*Stream),
-		processes: make(map[string]*FFmpegProcess),
-		config:    cfg,
-		extractor: ext,
-		ffmpeg:    NewFFmpegManager(&cfg.FFmpeg),
-		server:    srv,
-		storage:   store,
+		streams:       make(map[string]*Stream),
+		processes:     make(map[string]*FFmpegProcess),
+		config:        cfg,
+		extractor:     ext,
+		ffmpeg:        NewFFmpegManager(&cfg.FFmpeg),
+		server:        srv,
+		storage:       store,
+		loggerManager: logger.NewLoggerManager(store.GetDataDir(), 100),
 	}
 }
 
@@ -48,6 +51,8 @@ func NewManager(
 func (m *Manager) Start(ctx context.Context, youtubeURL, name string, port int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	log := m.loggerManager.GetLogger(name)
 
 	// Check if stream already exists
 	if _, exists := m.streams[name]; exists {
@@ -62,17 +67,21 @@ func (m *Manager) Start(ctx context.Context, youtubeURL, name string, port int) 
 	// Create new stream
 	stream := NewStream(name, youtubeURL, port)
 	stream.SetState(StateStarting)
+	log.Info("Starting stream from %s", youtubeURL)
 
 	// Extract stream URL
 	info, err := m.extractor.Extract(ctx, youtubeURL)
 	if err != nil {
+		log.Error("Failed to extract stream URL: %v", err)
 		return fmt.Errorf("failed to extract stream URL: %w", err)
 	}
 	stream.SetStreamURL(info.URL)
+	log.Info("Extracted stream URL successfully")
 
 	// Start FFmpeg process
 	proc, err := m.ffmpeg.Start(ctx, stream)
 	if err != nil {
+		log.Error("Failed to start FFmpeg: %v", err)
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
@@ -82,11 +91,13 @@ func (m *Manager) Start(ctx context.Context, youtubeURL, name string, port int) 
 	// Verify process is running
 	if !proc.IsRunning() {
 		stderr := proc.GetStderr()
+		log.Error("FFmpeg exited prematurely: %s", stderr)
 		return fmt.Errorf("ffmpeg exited prematurely: %s", stderr)
 	}
 
 	stream.SetState(StateRunning)
 	stream.SetStartedAt(time.Now())
+	log.Info("Stream started successfully (PID: %d, RTSP: %s)", proc.GetPID(), stream.RTSPPath)
 
 	// Store stream and process
 	m.streams[name] = stream
@@ -108,10 +119,12 @@ func (m *Manager) Stop(name string) error {
 
 // stopStream stops a stream (internal, must be called with lock held)
 func (m *Manager) stopStream(name string) error {
+	log := m.loggerManager.GetLogger(name)
 	stream, exists := m.streams[name]
 	if !exists {
 		// Try to load from storage and kill by PID
 		if data, err := m.storage.Load(name); err == nil && data.FFmpegPID > 0 {
+			log.Info("Stopping orphaned stream (PID: %d)", data.FFmpegPID)
 			KillByPID(data.FFmpegPID)
 			m.storage.Delete(name)
 			return nil
@@ -119,6 +132,7 @@ func (m *Manager) stopStream(name string) error {
 		return fmt.Errorf("stream '%s' not found", name)
 	}
 
+	log.Info("Stopping stream")
 	stream.SetState(StateStopping)
 
 	// Stop FFmpeg process
@@ -135,6 +149,7 @@ func (m *Manager) stopStream(name string) error {
 	// Clean up
 	delete(m.streams, name)
 	m.storage.Delete(name)
+	log.Info("Stream stopped")
 
 	return nil
 }
@@ -252,11 +267,13 @@ func (m *Manager) RestartStream(ctx context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	log := m.loggerManager.GetLogger(name)
 	stream, exists := m.streams[name]
 	if !exists {
 		return fmt.Errorf("stream '%s' not found", name)
 	}
 
+	log.Warn("Restarting stream")
 	youtubeURL := stream.YouTubeURL
 	port := stream.Port
 
@@ -268,18 +285,23 @@ func (m *Manager) RestartStream(ctx context.Context, name string) error {
 	err := m.Start(ctx, youtubeURL, name, port)
 	m.mu.Lock()
 
+	if err != nil {
+		log.Error("Restart failed: %v", err)
+	}
 	return err
 }
 
 // RefreshURL extracts a new stream URL for a stream
 func (m *Manager) RefreshURL(ctx context.Context, name string) error {
 	m.mu.Lock()
+	log := m.loggerManager.GetLogger(name)
 	stream, exists := m.streams[name]
 	if !exists {
 		m.mu.Unlock()
 		return fmt.Errorf("stream '%s' not found", name)
 	}
 
+	log.Info("Refreshing stream URL")
 	stream.SetState(StateReconnecting)
 	youtubeURL := stream.YouTubeURL
 	m.mu.Unlock()
@@ -287,6 +309,7 @@ func (m *Manager) RefreshURL(ctx context.Context, name string) error {
 	// Extract new URL
 	info, err := m.extractor.Extract(ctx, youtubeURL)
 	if err != nil {
+		log.Error("Failed to refresh URL: %v", err)
 		return fmt.Errorf("failed to extract new URL: %w", err)
 	}
 
@@ -294,6 +317,7 @@ func (m *Manager) RefreshURL(ctx context.Context, name string) error {
 	defer m.mu.Unlock()
 
 	stream.SetStreamURL(info.URL)
+	log.Info("URL refreshed successfully")
 	return nil
 }
 
@@ -366,4 +390,9 @@ func (m *Manager) GetAllStreams() []*Stream {
 		streams = append(streams, s)
 	}
 	return streams
+}
+
+// GetLoggerManager returns the logger manager (for monitor access)
+func (m *Manager) GetLoggerManager() *logger.LoggerManager {
+	return m.loggerManager
 }

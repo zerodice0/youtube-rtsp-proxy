@@ -9,6 +9,7 @@ import (
 
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/config"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/extractor"
+	"github.com/zerodice0/youtube-rtsp-proxy/internal/logger"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/server"
 	"github.com/zerodice0/youtube-rtsp-proxy/internal/stream"
 )
@@ -187,15 +188,20 @@ func (m *Monitor) handleServerFailure(ctx context.Context) {
 
 // handleStreamFailure handles a single stream failure
 func (m *Monitor) handleStreamFailure(ctx context.Context, s *stream.Stream, reason string) {
+	streamLog := m.getStreamLogger(s.Name)
 	s.IncrementErrorCount()
 	s.SetLastError(reason)
 	s.SetState(stream.StateReconnecting)
 
+	streamLog.Warn("Stream unhealthy: %s", reason)
+
 	// Check if we should refresh URL
 	if m.shouldRefreshURL(s, reason) {
 		log.Printf("[Monitor] Refreshing URL for stream '%s'", s.Name)
+		streamLog.Info("Refreshing URL due to: %s", reason)
 		if err := m.refreshStreamURL(ctx, s); err != nil {
 			log.Printf("[Monitor] Failed to refresh URL: %v", err)
+			streamLog.Error("URL refresh failed: %v", err)
 		}
 	}
 
@@ -257,6 +263,7 @@ func (m *Monitor) refreshStreamURL(ctx context.Context, s *stream.Stream) error 
 
 // reconnectStream attempts to reconnect a stream with exponential backoff
 func (m *Monitor) reconnectStream(ctx context.Context, s *stream.Stream) {
+	streamLog := m.getStreamLogger(s.Name)
 	backoff := m.config.Reconnect.InitialDelay
 
 	for attempt := 1; attempt <= m.config.Reconnect.MaxAttempts; attempt++ {
@@ -268,6 +275,7 @@ func (m *Monitor) reconnectStream(ctx context.Context, s *stream.Stream) {
 
 		log.Printf("[Monitor] Reconnect attempt %d/%d for stream '%s' (delay: %v)",
 			attempt, m.config.Reconnect.MaxAttempts, s.Name, backoff)
+		streamLog.Warn("Reconnect attempt %d/%d (delay: %v)", attempt, m.config.Reconnect.MaxAttempts, backoff)
 
 		// Stop existing process
 		if pid := s.GetFFmpegPID(); pid > 0 {
@@ -278,6 +286,7 @@ func (m *Monitor) reconnectStream(ctx context.Context, s *stream.Stream) {
 		// Restart stream
 		if err := m.streamManager.RestartStream(ctx, s.Name); err != nil {
 			log.Printf("[Monitor] Reconnect failed: %v", err)
+			streamLog.Error("Reconnect attempt %d failed: %v", attempt, err)
 
 			// Wait before next attempt
 			select {
@@ -292,6 +301,7 @@ func (m *Monitor) reconnectStream(ctx context.Context, s *stream.Stream) {
 
 		// Success
 		log.Printf("[Monitor] Stream '%s' reconnected successfully", s.Name)
+		streamLog.Info("Reconnected successfully after %d attempt(s)", attempt)
 		s.ResetConsecutiveErrors()
 		s.SetState(stream.StateRunning)
 		return
@@ -299,21 +309,26 @@ func (m *Monitor) reconnectStream(ctx context.Context, s *stream.Stream) {
 
 	// Max attempts reached
 	log.Printf("[Monitor] Max reconnect attempts reached for stream '%s'", s.Name)
+	streamLog.Error("Max reconnect attempts (%d) reached, giving up", m.config.Reconnect.MaxAttempts)
 	s.SetState(stream.StateError)
 }
 
 // restartStream restarts a stream after server recovery
 func (m *Monitor) restartStream(ctx context.Context, s *stream.Stream) {
+	streamLog := m.getStreamLogger(s.Name)
 	log.Printf("[Monitor] Restarting stream '%s' after server recovery", s.Name)
+	streamLog.Warn("Server recovery - restarting stream")
 
 	// Refresh URL first
 	if err := m.refreshStreamURL(ctx, s); err != nil {
 		log.Printf("[Monitor] Failed to refresh URL for stream '%s': %v", s.Name, err)
+		streamLog.Error("URL refresh failed during recovery: %v", err)
 	}
 
 	// Restart
 	if err := m.streamManager.RestartStream(ctx, s.Name); err != nil {
 		log.Printf("[Monitor] Failed to restart stream '%s': %v", s.Name, err)
+		streamLog.Error("Restart failed during recovery: %v", err)
 		m.reconnectStream(ctx, s)
 	}
 }
@@ -341,4 +356,9 @@ func (m *Monitor) ForceReconnect(ctx context.Context, name string) error {
 
 	go m.handleStreamFailure(ctx, s, "forced reconnection")
 	return nil
+}
+
+// getStreamLogger returns the logger for a specific stream
+func (m *Monitor) getStreamLogger(name string) *logger.StreamLogger {
+	return m.streamManager.GetLoggerManager().GetLogger(name)
 }
