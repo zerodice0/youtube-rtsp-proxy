@@ -17,10 +17,12 @@ var favCmd = &cobra.Command{
 	Long: `Manage your favorite YouTube URLs for quick access.
 
 Examples:
+  youtube-rtsp-proxy fav                                                    # Interactive mode
   youtube-rtsp-proxy fav add "https://www.youtube.com/watch?v=jfKfPfyJRdk" --name lofi
   youtube-rtsp-proxy fav list
   youtube-rtsp-proxy fav start lofi
   youtube-rtsp-proxy fav remove lofi`,
+	RunE: runFavInteractive,
 }
 
 var favAddCmd = &cobra.Command{
@@ -181,6 +183,162 @@ func runFavStart(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Starting favorite '%s'...\n", name)
+	fmt.Printf("  URL: %s\n", fav.URL)
+
+	if err := manager.Start(getContext(), fav.URL, name, port); err != nil {
+		return fmt.Errorf("failed to start stream: %w", err)
+	}
+
+	// Get local IP for display
+	localIP := getLocalIP()
+	fmt.Printf("\nStream started!\n")
+	fmt.Printf("  RTSP URL: rtsp://%s:%d/%s\n", localIP, port, name)
+
+	return nil
+}
+
+// runFavInteractive provides interactive favorite selection with start/stop toggle
+func runFavInteractive(cmd *cobra.Command, args []string) error {
+	if err := initFavStore(); err != nil {
+		return err
+	}
+
+	favorites, err := favStore.List()
+	if err != nil {
+		return err
+	}
+
+	// If no favorites, show help
+	if len(favorites) == 0 {
+		return cmd.Help()
+	}
+
+	// Get running streams to show status
+	runningStreams := make(map[string]bool)
+	if manager != nil {
+		streams := manager.List()
+		for _, s := range streams {
+			runningStreams[s.Name] = true
+		}
+	}
+
+	// Build selection items
+	items := make([]string, 0, len(favorites)+1)
+	nameMap := make(map[string]string) // display -> actual name
+
+	for _, fav := range favorites {
+		var status string
+		if runningStreams[fav.Name] {
+			status = "[▶ Running]"
+		} else {
+			status = "[⏹ Stopped]"
+		}
+		display := fmt.Sprintf("%-20s %s", fav.Name, status)
+		items = append(items, display)
+		nameMap[display] = fav.Name
+	}
+
+	// Add "add new" option
+	items = append(items, addNewOption)
+
+	// Show selection
+	selected, err := SelectItem(items, "Select favorite to toggle:")
+	if err != nil {
+		return err
+	}
+
+	// Handle cancel
+	if selected == "" {
+		fmt.Println("Cancelled.")
+		return nil
+	}
+
+	// Handle add new
+	if selected == addNewOption {
+		return runFavInteractiveAdd()
+	}
+
+	// Get actual name from selection
+	name := nameMap[selected]
+
+	// Toggle: if running -> stop, if stopped -> start
+	if runningStreams[name] {
+		return runFavStop(name)
+	}
+	return runFavStartByName(name)
+}
+
+// runFavInteractiveAdd prompts for URL and name to add a new favorite
+func runFavInteractiveAdd() error {
+	url, err := PromptInput("Enter YouTube URL: ")
+	if err != nil {
+		return err
+	}
+	if url == "" {
+		fmt.Println("Cancelled.")
+		return nil
+	}
+
+	name, err := PromptInput("Enter name for this favorite: ")
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Println("Cancelled.")
+		return nil
+	}
+
+	if err := favStore.Add(name, url); err != nil {
+		return err
+	}
+
+	fmt.Printf("\nAdded favorite '%s'\n", name)
+	fmt.Printf("  URL: %s\n", url)
+	return nil
+}
+
+// runFavStop stops a running stream
+func runFavStop(name string) error {
+	fmt.Printf("Stopping '%s'...\n", name)
+	if err := manager.Stop(name); err != nil {
+		return fmt.Errorf("failed to stop stream: %w", err)
+	}
+	fmt.Printf("Stream '%s' stopped.\n", name)
+	return nil
+}
+
+// runFavStartByName starts a stream by favorite name (reuses runFavStart logic)
+func runFavStartByName(name string) error {
+	fav, err := favStore.Get(name)
+	if err != nil {
+		return err
+	}
+
+	// Update last used
+	favStore.UpdateLastUsed(name)
+
+	// Check dependencies first
+	if err := checkDependencies(); err != nil {
+		return fmt.Errorf("dependency check failed:\n  %v", err)
+	}
+
+	// Ensure MediaMTX server is running
+	if !srv.IsRunning() {
+		fmt.Println("Starting MediaMTX server...")
+		if err := srv.Start(getContext()); err != nil {
+			return fmt.Errorf("failed to start MediaMTX: %w", err)
+		}
+	}
+
+	// Start monitoring if not already running
+	if !mon.IsRunning() {
+		mon.Start(getContext())
+	}
+
+	// Use default port
+	port := cfg.Server.RTSPPort
+
+	fmt.Printf("Starting '%s'...\n", name)
 	fmt.Printf("  URL: %s\n", fav.URL)
 
 	if err := manager.Start(getContext(), fav.URL, name, port); err != nil {
