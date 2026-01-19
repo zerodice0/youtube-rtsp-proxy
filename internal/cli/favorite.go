@@ -194,6 +194,15 @@ func runFavStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nStream started!\n")
 	fmt.Printf("  RTSP URL: rtsp://%s:%d/%s\n", localIP, port, name)
 
+	// Stay in foreground to keep monitor alive for auto-reconnection
+	fmt.Println("\nPress Ctrl+C to stop and exit.")
+	ctx := getContext()
+	<-ctx.Done()
+
+	// Graceful shutdown
+	fmt.Println("\nShutting down...")
+	manager.Stop(name)
+
 	return nil
 }
 
@@ -265,7 +274,21 @@ func runFavInteractive(cmd *cobra.Command, args []string) error {
 	if runningStreams[name] {
 		return runFavStop(name)
 	}
-	return runFavStartByName(name)
+
+	// Start the stream
+	if err := runFavStartByName(name); err != nil {
+		return err
+	}
+
+	// Stay in foreground to keep monitor alive for health checks
+	fmt.Println("\nPress Ctrl+C to stop and exit.")
+	ctx := getContext()
+	<-ctx.Done()
+
+	// Graceful shutdown
+	fmt.Println("\nShutting down...")
+	manager.Stop(name)
+	return nil
 }
 
 // runFavInteractiveAdd prompts for URL and name to add a new favorite
