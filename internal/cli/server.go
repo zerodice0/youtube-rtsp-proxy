@@ -1,15 +1,22 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/zerodice0/youtube-rtsp-proxy/internal/storage"
 )
 
-var foreground bool
+var (
+	foreground   bool
+	favorites    string
+	allFavorites bool
+)
 
 var serverCmd = &cobra.Command{
 	Use:   "server <start|stop|restart>",
@@ -48,6 +55,8 @@ var serverRestartCmd = &cobra.Command{
 
 func init() {
 	serverStartCmd.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground (blocking)")
+	serverStartCmd.Flags().StringVar(&favorites, "favorites", "", "comma-separated favorite names to start")
+	serverStartCmd.Flags().BoolVar(&allFavorites, "all-favorites", false, "start all favorites")
 
 	serverCmd.AddCommand(serverStartCmd)
 	serverCmd.AddCommand(serverStopCmd)
@@ -85,6 +94,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Recover any existing streams
 		manager.RecoverStreams()
+
+		// Start favorites if specified
+		if allFavorites || favorites != "" {
+			if err := startFavorites(ctx); err != nil {
+				fmt.Printf("Warning: failed to start some favorites: %v\n", err)
+			}
+		}
 
 		// Wait for interrupt
 		sigCh := make(chan os.Signal, 1)
@@ -136,5 +152,55 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("MediaMTX server restarted (PID: %d)\n", srv.GetPID())
+	return nil
+}
+
+// startFavorites starts streams for specified favorites
+func startFavorites(ctx context.Context) error {
+	favStore, err := storage.NewFavoritesStorage(cfg.Storage.DataDir)
+	if err != nil {
+		return err
+	}
+
+	var names []string
+	if allFavorites {
+		favList, err := favStore.List()
+		if err != nil {
+			return fmt.Errorf("failed to list favorites: %w", err)
+		}
+		for _, f := range favList {
+			names = append(names, f.Name)
+		}
+	} else {
+		names = strings.Split(favorites, ",")
+	}
+
+	if len(names) == 0 {
+		fmt.Println("No favorites to start.")
+		return nil
+	}
+
+	fmt.Printf("Starting %d favorite(s)...\n", len(names))
+
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		fav, err := favStore.Get(name)
+		if err != nil {
+			fmt.Printf("  Warning: favorite '%s' not found\n", name)
+			continue
+		}
+
+		fmt.Printf("  Starting '%s'...\n", name)
+		if err := manager.Start(ctx, fav.URL, name, cfg.Server.RTSPPort); err != nil {
+			fmt.Printf("    Failed: %v\n", err)
+		} else {
+			fmt.Printf("    Started: rtsp://localhost:%d/%s\n", cfg.Server.RTSPPort, name)
+		}
+	}
+
 	return nil
 }
